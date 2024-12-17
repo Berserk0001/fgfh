@@ -129,14 +129,14 @@ async function hhproxy(req, res) {
     return res.end("bandwidth-hero-proxy");
   }
 
-
   req.params = {
     url: decodeURIComponent(url),
     webp: !req.query.jpeg,
     grayscale: req.query.bw != 0,
     quality: parseInt(req.query.l, 10) || DEFAULT_QUALITY
   };
-const userAgent = new UserAgent();
+
+  const userAgent = new UserAgent();
   const options = {
     headers: {
       ...pick(req.headers, ["cookie", "dnt", "referer", "range"]),
@@ -149,14 +149,12 @@ const userAgent = new UserAgent();
     maxRedirects: 4
   };
 
- // const requestModule = parsedUrl.protocol === 'https:' ? https : http;
-
   try {
-    let originReq = await https.request(req.params.url, options, (originRes) => {
+    https.get(req.params.url, options, function (originRes) {
       _onRequestResponse(originRes, req, res);
+    }).on('error', (err) => {
+      _onRequestError(req, res, err);
     });
-
-    originReq.end();
   } catch (err) {
     _onRequestError(req, res, err);
   }
@@ -191,7 +189,7 @@ function _onRequestResponse(originRes, req, res) {
 
   req.params.originType = originRes.headers["content-type"] || "";
   req.params.originSize = parseInt(originRes.headers["content-length"] || "0", 10);
- 
+
   originRes.on('error', _ => req.socket.destroy());
 
   if (shouldCompress(req)) {
@@ -205,7 +203,7 @@ function _onRequestResponse(originRes, req, res) {
       }
     });
 
-   return originRes.pipe(res);
+    return originRes.pipe(res);
   }
 }
 
