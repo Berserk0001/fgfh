@@ -57,7 +57,7 @@ const sharpStream = _ => sharp({ animated: false, unlimited: true });
 function compress(req, res, input) {
   const format = "webp";
   sharp.cache(false);
-  sharp.simd(false);
+  sharp.simd(true);
   const transform = sharpStream();
 
   // Pipe the input to the transform pipeline
@@ -101,7 +101,6 @@ function compress(req, res, input) {
     });
 }
 
-// 
 /**
  * Main proxy handler for bandwidth optimization.
  * @param {http.IncomingMessage} req - The incoming HTTP request.
@@ -190,8 +189,5 @@ function _onRequestResponse(originRes, req, res) {
     return originRes.pipe(res);
   }
 }
-
-
-
 
 export default hhproxy;
