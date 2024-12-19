@@ -3,206 +3,190 @@ import https from "https";
 import sharp from "sharp";
 import pick from "./pick.js";
 import UserAgent from 'user-agents';
+const DEFAULT_QUALITY = 40;
+const MIN_COMPRESS_LENGTH = 1024;
+const MIN_TRANSPARENT_COMPRESS_LENGTH = MIN_COMPRESS_LENGTH * 100;
 
-// Configuration constants
-const CONFIG = {
-  DEFAULT_QUALITY: 40,
-  MIN_COMPRESS_LENGTH: 1024,
-  MIN_TRANSPARENT_COMPRESS_LENGTH: 1024 * 100,
-  MAX_WEBP_HEIGHT: 16383,
-  MAX_REDIRECTS: 4,
-  MAX_IMAGE_SIZE: 100 * 1024 * 1024, // 100MB max image size
-  TIMEOUT: 30000 // 30 seconds timeout
-};
+// Helper: Should compress
+function shouldCompress(req) {
+  const { originType, originSize, webp } = req.params;
+
+  if (!originType.startsWith("image")) return false;
+  if (originSize === 0) return false;
+  if (req.headers.range) return false;
+  if (webp && originSize < MIN_COMPRESS_LENGTH) return false;
+  if (
+    !webp &&
+    (originType.endsWith("png") || originType.endsWith("gif")) &&
+    originSize < MIN_TRANSPARENT_COMPRESS_LENGTH
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+// Helper: Copy headers
+function copyHeaders(source, target) {
+  for (const [key, value] of Object.entries(source.headers)) {
+    try {
+      target.setHeader(key, value);
+    } catch (e) {
+      console.log(e.message);
+    }
+  }
+}
+
+// Helper: Redirect
+function redirect(req, res) {
+  if (res.headersSent) return;
+
+  res.setHeader("content-length", 0);
+  res.removeHeader("cache-control");
+  res.removeHeader("expires");
+  res.removeHeader("date");
+  res.removeHeader("etag");
+  res.setHeader("location", encodeURI(req.params.url));
+  res.statusCode = 302;
+  res.end();
+}
+
+// Helper: Compress
+const sharpStream = _ => sharp({ animated: false, unlimited: true });
+
+function compress(req, res, input) {
+  const format = "webp";
+  sharp.cache(true);
+  sharp.simd(true);
+  const transform = sharpStream();
+
+  // Pipe the input to the transform pipeline
+  input.pipe(transform);
+
+  // Fetch metadata and process the image
+  transform
+    .metadata()
+    .then((metadata) => {
+      // Resize if height exceeds the WebP limit
+      if (metadata.height > 16383) {
+        transform.resize({ height: 16383 });
+      }
+
+      // Apply grayscale and compression options
+      transform
+        .grayscale(req.params.grayscale)
+        .toFormat(format, {
+          quality: req.params.quality,
+          lossless: false,
+          effort: 0, // Balance performance and compression (range: 0–6)
+        });
+
+      // Pipe the output directly to the response
+      transform
+        .on('info', (info) => {
+          res.setHeader("content-type", `image/${format}`);
+          res.setHeader("content-length", info.size);
+          res.setHeader("x-original-size", req.params.originSize);
+          res.setHeader("x-bytes-saved", req.params.originSize - info.size);
+        })
+        .on('error', (err) => {
+          console.error("Compression error:", err.message);
+          redirect(req, res);
+        })
+        .pipe(res, { end: true });  // Directly pipe the transform output to the response
+    })
+    .catch((err) => {
+      console.error("Metadata error:", err.message);
+      redirect(req, res);
+    });
+}
 
 /**
- * @typedef {Object} RequestParams
- * @property {string} url - The decoded URL to proxy
- * @property {boolean} webp - Whether to use WebP format
- * @property {boolean} grayscale - Whether to apply grayscale
- * @property {number} quality - Compression quality
- * @property {string} originType - Original content type
- * @property {number} originSize - Original file size
- */
-
-/**
- * Main proxy handler for bandwidth optimization
- * @param {import('http').IncomingMessage} req - The incoming HTTP request
- * @param {import('http').ServerResponse} res - The HTTP response
- * @returns {Promise<void>}
+ * Main proxy handler for bandwidth optimization.
+ * @param {http.IncomingMessage} req - The incoming HTTP request.
+ * @param {http.ServerResponse} res - The HTTP response.
  */
 async function hhproxy(req, res) {
-  // Input validation
   const url = req.query.url;
   if (!url) {
-    res.statusCode = 400;
-    return res.end("Missing URL parameter");
+    return res.end("bandwidth-hero-proxy");
   }
 
-  let decodedUrl;
-  try {
-    decodedUrl = decodeURIComponent(url);
-    new URL(decodedUrl); // URL validation
-  } catch (err) {
-    res.statusCode = 400;
-    return res.end("Invalid URL format");
-  }
-
-  // Request parameters setup
-  const { jpeg, bw, l: quality } = req.query;
   req.params = {
-    url: decodedUrl,
-    webp: !jpeg,
-    grayscale: bw != 0,
-    quality: Math.min(Math.max(parseInt(quality, 10) || CONFIG.DEFAULT_QUALITY, 1), 100),
-    attempts: 0
+    url: decodeURIComponent(url),
+    webp: !req.query.jpeg,
+    grayscale: req.query.bw != 0,
+    quality: parseInt(req.query.l, 10) || DEFAULT_QUALITY
   };
 
-  // Request headers setup
   const userAgent = new UserAgent();
   const options = {
     headers: {
-      ...pick(req.headers, ["cookie", "dnt", "referer"]),
+      ...pick(req.headers, ["cookie", "dnt", "referer", "range"]),
       "User-Agent": userAgent.toString(),
       "X-Forwarded-For": req.headers["x-forwarded-for"] || req.ip,
-      "Via": "1.1 bandwidth-hero",
-      "Accept": "image/*,*/*;q=0.8"
+      Via: "1.1 bandwidth-hero"
     },
     method: 'GET',
     rejectUnauthorized: false,
-    timeout: CONFIG.TIMEOUT
+    maxRedirects: 4
   };
 
   try {
-    await makeRequest(req, res, options);
+    https.get(req.params.url, options, function (originRes) {
+      _onRequestResponse(originRes, req, res);
+    }).on('error', (err) => {
+      _onRequestError(req, res, err);
+    });
   } catch (err) {
-    handleError(req, res, err);
+    _onRequestError(req, res, err);
   }
 }
 
-/**
- * Makes the HTTP request with proper error handling
- * @param {Object} req - Request object
- * @param {Object} res - Response object
- * @param {Object} options - Request options
- */
-function makeRequest(req, res, options) {
-  return new Promise((resolve, reject) => {
-    const request = https.get(req.params.url, options);
+function _onRequestError(req, res, err) {
+  if (err.code === "ERR_INVALID_URL") {
+    res.statusCode = 400;
+    return res.end("Invalid URL");
+  }
 
-    // Set timeout
-    request.setTimeout(CONFIG.TIMEOUT, () => {
-      request.destroy();
-      reject(new Error('Request timeout'));
-    });
-
-    // Handle request error
-    request.on('error', (err) => {
-      reject(err);
-    });
-
-    // Handle response
-    request.on('response', (originRes) => {
-      handleResponse(originRes, req, res)
-        .then(resolve)
-        .catch(reject);
-    });
-  });
+  redirect(req, res);
+  console.error(err);
 }
 
-/**
- * Handles the response from the origin server
- * @param {Object} originRes - Origin response
- * @param {Object} req - Request object
- * @param {Object} res - Response object
- */
-async function handleResponse(originRes, req, res) {
-  // Handle redirects
-  if (originRes.statusCode >= 300 && originRes.statusCode < 400 && originRes.headers.location) {
-    if (req.params.attempts >= CONFIG.MAX_REDIRECTS) {
-      throw new Error('Too many redirects');
-    }
-    req.params.attempts++;
-    req.params.url = new URL(originRes.headers.location, req.params.url).toString();
+function _onRequestResponse(originRes, req, res) {
+  if (originRes.statusCode >= 400) {
     return redirect(req, res);
   }
 
-  // Handle errors
-  if (originRes.statusCode >= 400) {
-    throw new Error(`Origin server responded with ${originRes.statusCode}`);
+  if (originRes.statusCode >= 300 && originRes.headers.location) {
+    req.params.url = originRes.headers.location;
+    return redirect(req, res); // Follow the redirect manually
   }
 
-  // Setup response headers
   copyHeaders(originRes, res);
-  setupResponseHeaders(res);
 
-  // Get content info
-  req.params.originType = originRes.headers["content-type"] || "";
-  req.params.originSize = parseInt(originRes.headers["content-length"] || "0", 10);
-
-  // Check size limits
-  if (req.params.originSize > CONFIG.MAX_IMAGE_SIZE) {
-    throw new Error('Image too large');
-  }
-
-  // Handle compression
-  if (shouldCompress(req)) {
-    await compress(req, res, originRes);
-  } else {
-    bypass(originRes, res);
-  }
-}
-
-/**
- * Sets up response headers
- * @param {Object} res - Response object
- */
-function setupResponseHeaders(res) {
   res.setHeader("Content-Encoding", "identity");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
-  res.setHeader("Cache-Control", "public, max-age=31536000");
-}
 
-/**
- * Bypasses compression for certain conditions
- * @param {Object} originRes - Origin response
- * @param {Object} res - Response object
- */
-function bypass(originRes, res) {
-  res.setHeader("X-Proxy-Bypass", "1");
-  const headersToKeep = ["accept-ranges", "content-type", "content-length", "content-range"];
-  
-  headersToKeep.forEach(header => {
-    if (originRes.headers[header]) {
-      res.setHeader(header, originRes.headers[header]);
-    }
-  });
+  req.params.originType = originRes.headers["content-type"] || "";
+  req.params.originSize = parseInt(originRes.headers["content-length"] || "0", 10);
 
-  originRes.pipe(res);
-}
+  originRes.on('error', _ => req.socket.destroy());
 
-/**
- * Handles errors in the proxy
- * @param {Object} req - Request object
- * @param {Object} res - Response object
- * @param {Error} err - Error object
- */
-function handleError(req, res, err) {
-  console.error(`Error processing ${req.params.url}:`, err);
+  if (shouldCompress(req)) {
+    return compress(req, res, originRes);
+  } else {
+    res.setHeader("X-Proxy-Bypass", 1);
 
-  if (!res.headersSent) {
-    if (err.code === "ENOTFOUND" || err.code === "ECONNREFUSED") {
-      res.statusCode = 404;
-      res.end("Not Found");
-    } else if (err.message === 'Request timeout') {
-      res.statusCode = 504;
-      res.end("Gateway Timeout");
-    } else {
-      res.statusCode = 500;
-      res.end("Internal Server Error");
-    }
+    ["accept-ranges", "content-type", "content-length", "content-range"].forEach(header => {
+      if (originRes.headers[header]) {
+        res.setHeader(header, originRes.headers[header]);
+      }
+    });
+
+    return originRes.pipe(res);
   }
 }
 
