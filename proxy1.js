@@ -54,59 +54,55 @@ function redirect(req, res) {
 // Helper: Compress;
 function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
-    const transformer = sharp();
-    const bufferChunks = [];
-    let bufferSize = 0;
 
-    // Pipe the input through sharp transformation
-    input.pipe(transformer);
+    let chunks = []; // Array to store streamed chunks
 
-    // Metadata processing to check resizing constraints
-    transformer.metadata()
-        .then(metadata => {
-            // Resize if height exceeds 16383 pixels
-            if (metadata.height > 16383) {
-                transformer.resize({ height: 16383, width: null });
-            }
+    input.on('data', (chunk) => {
+        chunks.push(chunk);
+    });
 
-            // Apply transformations (grayscale, format, quality)
-            transformer.grayscale(req.params.grayscale)
-                .toFormat(format, {
-                    quality: req.params.quality,
-                    progressive: true,
-                    optimizeScans: true
-                });
+    input.on('end', () => {
+        const buffer = Buffer.concat(chunks); // Combine all chunks into a single buffer
 
-            // Pipe the transformed data into a buffer collector
-            transformer.on('data', chunk => {
-                bufferChunks.push(chunk);
-                bufferSize += chunk.length;
+        sharp(buffer)
+            .metadata()
+            .then(metadata => {
+                const transformer = sharp(buffer);
 
-                // If buffer reaches 1 MB (1,048,576 bytes), send it
-                if (bufferSize >= 1048576) {
-                    if (!res.headersSent) {
-                        res.setHeader('content-type', `image/${format}`);
-                        res.setHeader('x-original-size', req.params.originSize);
-                    }
-                    res.write(Buffer.concat(bufferChunks));
-                    bufferChunks.length = 0; // Reset buffer for more data
-                    bufferSize = 0; // Reset buffer size
+                // Resize if height exceeds 16383 pixels
+                if (metadata.height > 16383) {
+                    transformer.resize({ height: 16383, width: null });
                 }
-            });
 
-            // When all data is processed, send the remaining buffer
-            transformer.on('end', () => {
-                if (bufferChunks.length > 0) {
-                    res.write(Buffer.concat(bufferChunks));
-                }
-                res.end(); // End the response
-            });
+                return transformer
+                    .grayscale(req.params.grayscale)
+                    .toFormat(format, {
+                        quality: req.params.quality,
+                        progressive: true,
+                        optimizeScans: true
+                    })
+                    .toBuffer({ resolveWithObject: true }); // Returns buffer and metadata
+            })
+            .then(({ data, info }) => {
+                if (res.headersSent) return redirect(req, res);
 
-        })
-        .catch(err => {
-            console.error('Error processing image:', err);
-            redirect(req, res);
-        });
+                res.setHeader('content-type', `image/${format}`);
+                res.setHeader('content-length', info.size);
+                res.setHeader('x-original-size', req.params.originSize);
+                res.setHeader('x-bytes-saved', req.params.originSize - info.size);
+                res.status(200);
+                res.end(data); // Send the processed image as a buffer
+            })
+            .catch(err => {
+                console.error('Error processing image:', err);
+                redirect(req, res);
+            });
+    });
+
+    input.on('error', (err) => {
+        console.error('Error reading input:', err);
+        redirect(req, res);
+    });
 }
 
 /**
