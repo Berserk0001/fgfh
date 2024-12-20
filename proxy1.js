@@ -59,7 +59,8 @@ function compress(req, res, input) {
         .toFormat(format, {
             quality: req.params.quality,
             progressive: true,
-            optimizeScans: true
+            optimizeScans: true,
+          effortv 0
         });
 
     input.pipe(transformer)
