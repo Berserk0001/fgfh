@@ -54,55 +54,46 @@ function redirect(req, res) {
 // Helper: Compress;
 function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
+    const transform = sharp();
+    
+    input.pipe(transform);
 
-    let chunks = []; // Array to store streamed chunks
+    transform.metadata()
+        .then(metadata => {
+            // Resize if height exceeds 16383 pixels
+            if (metadata.height > 16383) {
+                transform.resize({ height: 16383, width: null });
+            }
 
-    input.on('data', (chunk) => {
-        chunks.push(chunk);
-    });
-
-    input.on('end', () => {
-        const buffer = Buffer.concat(chunks); // Combine all chunks into a single buffer
-
-        sharp(buffer)
-            .metadata()
-            .then(metadata => {
-                const transformer = sharp(buffer);
-
-                // Resize if height exceeds 16383 pixels
-                if (metadata.height > 16383) {
-                    transformer.resize({ height: 16383, width: null });
-                }
-
-                return transformer
-                    .grayscale(req.params.grayscale)
-                    .toFormat(format, {
-                        quality: req.params.quality,
-                        progressive: true,
-                        optimizeScans: true
-                    })
-                    .toBuffer({ resolveWithObject: true }); // Returns buffer and metadata
-            })
-            .then(({ data, info }) => {
-                if (res.headersSent) return redirect(req, res);
-
-                res.setHeader('content-type', `image/${format}`);
-                res.setHeader('content-length', info.size);
-                res.setHeader('x-original-size', req.params.originSize);
-                res.setHeader('x-bytes-saved', req.params.originSize - info.size);
-                res.status(200);
-                res.end(data); // Send the processed image as a buffer
-            })
-            .catch(err => {
-                console.error('Error processing image:', err);
-                redirect(req, res);
-            });
-    });
-
-    input.on('error', (err) => {
-        console.error('Error reading input:', err);
-        redirect(req, res);
-    });
+            transform
+              .grayscale(req.params.grayscale)
+                .toFormat(format, {
+                    quality: req.params.quality,
+                    progressive: true,
+                    optimizeScans: true
+                })
+                .on('data', (chunk) => {
+                    // Write chunks to the response
+                    if (!res.headersSent) {
+                        res.setHeader('content-type', `image/${format}`);
+                        res.setHeader('x-original-size', req.params.originSize);
+                        res.setHeader('x-bytes-saved', req.params.originSize - req.params.quality);
+                    }
+                    res.write(chunk);  // Send the current chunk to the client
+                })
+                .on('end', () => {
+                    // Finish the response after all chunks are written
+                    res.end();
+                })
+                .on('error', err => {
+                    console.error('Error processing image:', err);
+                    redirect(req, res);
+                });
+        })
+        .catch(err => {
+            console.error('Error processing image:', err);
+            redirect(req, res);
+        });
 }
 
 /**
