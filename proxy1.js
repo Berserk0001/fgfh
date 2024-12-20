@@ -52,50 +52,61 @@ function redirect(req, res) {
 }
 
 // Helper: Compress;
-import { PassThrough } from 'stream';
-
 function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
-    const transform = sharp()
-        .grayscale(req.params.grayscale)
-        .toFormat(format, {
-            quality: req.params.quality,
-            progressive: true,
-            optimizeScans: true,
-        });
+    const transformer = sharp();
+    const bufferChunks = [];
+    let bufferSize = 0;
 
-    input.pipe(transform); // Pipe input directly to sharp
+    // Pipe the input through sharp transformation
+    input.pipe(transformer);
 
-    const passthrough = new PassThrough(); // Stream to split into 1MB chunks
-
-    transform.on('data', (chunk) => {
-        // Process each chunk, ensuring chunks are not larger than 1MB
-        passthrough.write(chunk);
-
-        while (passthrough.readableLength >= 1024 * 1024) {
-            const data = passthrough.read(1024 * 1024);
-            if (data) {
-                res.write(data); // Send 1MB chunk to client
+    // Metadata processing to check resizing constraints
+    transformer.metadata()
+        .then(metadata => {
+            // Resize if height exceeds 16383 pixels
+            if (metadata.height > 16383) {
+                transformer.resize({ height: 16383, width: null });
             }
-        }
-    });
 
-    transform.on('end', () => {
-        // Send remaining data smaller than 1MB
-        const remaining = passthrough.read();
-        if (remaining) {
-            res.write(remaining);
-        }
-        res.end();
-    });
+            // Apply transformations (grayscale, format, quality)
+            transformer.grayscale(req.params.grayscale)
+                .toFormat(format, {
+                    quality: req.params.quality,
+                    progressive: true,
+                    optimizeScans: true
+                });
 
-    transform.on('error', (err) => {
-        console.error('Error processing image:', err);
-        redirect(req, res);
-    });
+            // Pipe the transformed data into a buffer collector
+            transformer.on('data', chunk => {
+                bufferChunks.push(chunk);
+                bufferSize += chunk.length;
 
-    res.setHeader('content-type', `image/${format}`);
-    res.setHeader('transfer-encoding', 'chunked'); // Inform client of chunked transfer
+                // If buffer reaches 1 MB (1,048,576 bytes), send it
+                if (bufferSize >= 1048576) {
+                    if (!res.headersSent) {
+                        res.setHeader('content-type', `image/${format}`);
+                        res.setHeader('x-original-size', req.params.originSize);
+                    }
+                    res.write(Buffer.concat(bufferChunks));
+                    bufferChunks.length = 0; // Reset buffer for more data
+                    bufferSize = 0; // Reset buffer size
+                }
+            });
+
+            // When all data is processed, send the remaining buffer
+            transformer.on('end', () => {
+                if (bufferChunks.length > 0) {
+                    res.write(Buffer.concat(bufferChunks));
+                }
+                res.end(); // End the response
+            });
+
+        })
+        .catch(err => {
+            console.error('Error processing image:', err);
+            redirect(req, res);
+        });
 }
 
 /**
