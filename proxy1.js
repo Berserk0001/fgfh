@@ -56,7 +56,7 @@ const sharpStream = _ => sharp({ animated: false, unlimited: true });
 
 function compress(req, res, input) {
   const format = "webp";
-  sharp.cache(true);
+  sharp.cache(false);
   sharp.simd(true);
   const transform = sharpStream();
 
