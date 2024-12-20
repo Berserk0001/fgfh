@@ -60,7 +60,7 @@ function compress(req, res, input) {
             quality: req.params.quality,
             progressive: true,
             optimizeScans: true,
-          effortv 0
+          effort: 0
         });
 
     input.pipe(transformer)
