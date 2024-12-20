@@ -62,7 +62,7 @@ function compress(req, res, input) {
   const transform = sharpStream();
 
   // Pipe the input to the transform pipeline
-  input.body.pipe(transform);
+  input.pipe(transform);
 
   // Fetch metadata and process the image
   transform
