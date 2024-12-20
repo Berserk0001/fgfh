@@ -64,7 +64,7 @@ const sharpStream = _ => sharp({ animated: !process.env.NO_ANIMATE, unlimited: t
 function compress(req, res, input) {
   const format = req.params.webp ? 'webp' : 'jpeg';
 
-  input.body.pipe(sharpStream().metadata((err, metadata) => {
+  input.pipe(sharpStream().metadata((err, metadata) => {
     if (err) {
       return redirect(req, res);
     }
@@ -81,7 +81,7 @@ function compress(req, res, input) {
       transformer = transformer.resize({ height: 16383 });
     }
 
-    input.body.pipe(transformer)
+    input.pipe(transformer)
       .on('info', info => {
         res.setHeader('content-type', 'image/' + format);
         res.setHeader('content-length', info.size);
