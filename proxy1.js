@@ -53,35 +53,44 @@ function redirect(req, res) {
 
 // Helper: Compress;
 function compress(req, res, input) {
-    const format = req.params.webp ? 'webp' : 'jpeg';
-    const transformer = sharp()
-        .grayscale(req.params.grayscale)
-        .toFormat(format, {
-            quality: req.params.quality,
-            progressive: true,
-            optimizeScans: true,
-          effort: 0
-        });
+"use strict";
+/*
+ * compress.js
+ * A module that compresses an image.
+ * compress(httpRequest, httpResponse, ReadableStream);
+ */
+const sharpStream = _ => sharp({ animated: !process.env.NO_ANIMATE, unlimited: true });
 
-    input.pipe(transformer)
-        .metadata()
-        .then(metadata => {
-            if (metadata.height > 16383) {
-                transformer.resize({ height: 16383 });
-            }
-            return transformer.toBuffer();
-        })
-        .then(({ data, info }) => {
-            if (!info || res.headersSent) return redirect(req, res);
-            res.setHeader('content-type', `image/${format}`);
-            res.setHeader('content-length', info.size);
-            res.setHeader('x-original-size', req.params.originSize);
-            res.setHeader('x-bytes-saved', req.params.originSize - info.size);
-            res.status(200);
-            //res.write(data);
-            res.end(data);
-        })
-        .catch(err => redirect(req, res));
+function compress(req, res, input) {
+  const format = req.params.webp ? 'webp' : 'jpeg';
+
+  input.body.pipe(sharpStream().metadata((err, metadata) => {
+    if (err) {
+      return redirect(req, res);
+    }
+
+    let transformer = sharpStream()
+      .grayscale(req.params.grayscale)
+      .toFormat(format, {
+        quality: req.params.quality,
+        progressive: true,
+        optimizeScans: true
+      });
+
+    if (metadata.height > 16383) {
+      transformer = transformer.resize({ height: 16383 });
+    }
+
+    input.body.pipe(transformer)
+      .on('info', info => {
+        res.setHeader('content-type', 'image/' + format);
+        res.setHeader('content-length', info.size);
+        res.setHeader('x-original-size', req.params.originSize);
+        res.setHeader('x-bytes-saved', req.params.originSize - info.size);
+      })
+      .pipe(res)
+      .on('error', () => redirect(req, res));
+  }));
 }
 
 /**
