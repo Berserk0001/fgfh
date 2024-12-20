@@ -54,61 +54,49 @@ function redirect(req, res) {
 // Helper: Compress;
 import { PassThrough } from 'stream';
 
- function compress(req, res, input) {
+function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
-    const passThrough = new PassThrough(); // To stream chunks to the client
     const transform = sharp()
         .grayscale(req.params.grayscale)
-        .resize({ height: 16383, width: null })
         .toFormat(format, {
             quality: req.params.quality,
             progressive: true,
             optimizeScans: true,
         });
 
-    let bytesSent = 0;
+    input.pipe(transform); // Pipe input directly to sharp
 
-    // Pipe the input through sharp for processing
-    input.pipe(transform).on('error', (err) => {
+    const passthrough = new PassThrough(); // Stream to split into 1MB chunks
+
+    transform.on('data', (chunk) => {
+        // Process each chunk, ensuring chunks are not larger than 1MB
+        passthrough.write(chunk);
+
+        while (passthrough.readableLength >= 1024 * 1024) {
+            const data = passthrough.read(1024 * 1024);
+            if (data) {
+                res.write(data); // Send 1MB chunk to client
+            }
+        }
+    });
+
+    transform.on('end', () => {
+        // Send remaining data smaller than 1MB
+        const remaining = passthrough.read();
+        if (remaining) {
+            res.write(remaining);
+        }
+        res.end();
+    });
+
+    transform.on('error', (err) => {
         console.error('Error processing image:', err);
         redirect(req, res);
     });
 
-    // Pipe the sharp output to the PassThrough stream
-    transform.pipe(passThrough);
-
-    // Set headers before starting to stream data
-    passThrough.on('data', (chunk) => {
-        if (!res.headersSent) {
-            res.setHeader('content-type', `image/${format}`);
-            res.setHeader('content-disposition', 'inline');
-        }
-
-        // Track bytes sent to implement chunking logic if necessary
-        bytesSent += chunk.length;
-
-        // Send chunks to the client (1 MB max per chunk)
-        if (bytesSent <= 1024 * 1024) {
-            res.write(chunk);
-        } else {
-            res.write(chunk);
-            bytesSent = 0; // Reset byte counter for the next chunk
-        }
-    });
-
-    passThrough.on('end', () => {
-        if (!res.headersSent) {
-            res.status(200);
-        }
-        res.end(); // End the response
-    });
-
-    passThrough.on('error', (err) => {
-        console.error('Error streaming data:', err);
-        redirect(req, res);
-    });
+    res.setHeader('content-type', `image/${format}`);
+    res.setHeader('transfer-encoding', 'chunked'); // Inform client of chunked transfer
 }
-
 
 /**
  * Main proxy handler for bandwidth optimization.
