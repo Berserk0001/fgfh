@@ -52,13 +52,6 @@ function redirect(req, res) {
 }
 
 // Helper: Compress;
-function compress(req, res, input) {
-"use strict";
-/*
- * compress.js
- * A module that compresses an image.
- * compress(httpRequest, httpResponse, ReadableStream);
- */
 const sharpStream = _ => sharp({ animated: !process.env.NO_ANIMATE, unlimited: true });
 
 function compress(req, res, input) {
