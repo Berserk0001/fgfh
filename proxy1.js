@@ -52,53 +52,27 @@ function redirect(req, res) {
 }
 
 // Helper: Compress
-const sharpStream = _ => sharp({ animated: false, unlimited: true });
-
 function compress(req, res, input) {
-  const format = "webp";
-  sharp.cache(false);
-  sharp.simd(true);
-  const transform = sharpStream();
-
-  // Pipe the input to the transform pipeline
-  input.pipe(transform);
-
-  // Fetch metadata and process the image
-  transform
-    .metadata()
-    .then((metadata) => {
-      // Resize if height exceeds the WebP limit
-      if (metadata.height > 16383) {
-        transform.resize({ height: 16383 });
-      }
-
-      // Apply grayscale and compression options
-      transform
+    const format = req.params.webp ? 'webp' : 'jpeg';
+    const transformer = sharp()
         .grayscale(req.params.grayscale)
         .toFormat(format, {
-          quality: req.params.quality,
-          lossless: false,
-          effort: 0, // Balance performance and compression (range: 0–6)
+            quality: req.params.quality,
+            progressive: true,
+            optimizeScans: true,
+          effort: 0
         });
 
-      // Pipe the output directly to the response
-      transform
-        .on('info', (info) => {
-          res.setHeader("content-type", `image/${format}`);
-          res.setHeader("content-length", info.size);
-          res.setHeader("x-original-size", req.params.originSize);
-          res.setHeader("x-bytes-saved", req.params.originSize - info.size);
+    input.pipe(transformer)
+        .metadata()
+        .then(metadata => {
+            if (metadata.height > 16383) {
+                transformer.resize({ height: 16383 });
+            }
+            res.setHeader('content-type', `image/${format}`);
+            transformer.pipe(res);
         })
-        .on('error', (err) => {
-          console.error("Compression error:", err.message);
-          redirect(req, res);
-        })
-        .pipe(res, { end: true });  // Directly pipe the transform output to the response
-    })
-    .catch((err) => {
-      console.error("Metadata error:", err.message);
-      redirect(req, res);
-    });
+        .catch(err => redirect(req, res));
 }
 
 /**
