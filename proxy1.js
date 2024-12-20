@@ -51,7 +51,7 @@ function redirect(req, res) {
   res.end();
 }
 
-// Helper: Compress
+// Helper: Compress;
 function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
     const transformer = sharp()
@@ -59,8 +59,7 @@ function compress(req, res, input) {
         .toFormat(format, {
             quality: req.params.quality,
             progressive: true,
-            optimizeScans: true,
-          effort: 0
+            optimizeScans: true
         });
 
     input.pipe(transformer)
@@ -69,8 +68,17 @@ function compress(req, res, input) {
             if (metadata.height > 16383) {
                 transformer.resize({ height: 16383 });
             }
+            return transformer.toBuffer();
+        })
+        .then(({ data, info }) => {
+            if (!info || res.headersSent) return redirect(req, res);
             res.setHeader('content-type', `image/${format}`);
-            transformer.pipe(res);
+            res.setHeader('content-length', info.size);
+            res.setHeader('x-original-size', req.params.originSize);
+            res.setHeader('x-bytes-saved', req.params.originSize - info.size);
+            res.status(200);
+            res.write(data);
+            res.end();
         })
         .catch(err => redirect(req, res));
 }
