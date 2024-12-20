@@ -52,67 +52,63 @@ function redirect(req, res) {
 }
 
 // Helper: Compress;
-function compress(req, res, input) {
+import { PassThrough } from 'stream';
+
+ function compress(req, res, input) {
     const format = req.params.webp ? 'webp' : 'jpeg';
+    const passThrough = new PassThrough(); // To stream chunks to the client
     const transform = sharp()
         .grayscale(req.params.grayscale)
+        .resize({ height: 16383, width: null })
         .toFormat(format, {
             quality: req.params.quality,
             progressive: true,
-            optimizeScans: true
+            optimizeScans: true,
         });
 
-    // Resize if necessary
-    transform.metadata()
-        .then(metadata => {
-            if (metadata.height > 16383) {
-                transform.resize({ height: 16383, width: null });
-            }
-        })
-        .catch(err => {
-            console.error('Error fetching metadata:', err);
-            redirect(req, res);
-            return;
-        });
+    let bytesSent = 0;
 
-    // Stream the transformed data
-    res.setHeader('Content-Type', `image/${format}`);
-    res.setHeader('Transfer-Encoding', 'chunked');
-
-    let totalBytesSent = 0;
-
-    // Pipe input to sharp transform and then send to response
-    const pipeline = input.pipe(transform);
-
-    pipeline.on('data', chunk => {
-        totalBytesSent += chunk.length;
-        if (totalBytesSent <= 1024 * 1024) { // Send in chunks of up to 1 MB
-            res.write(chunk);
-        } else {
-            setTimeout(() => res.write(chunk), 10); // Throttle sending if needed
-        }
-    });
-
-    pipeline.on('end', () => {
-        res.end();
-    });
-
-    pipeline.on('error', err => {
+    // Pipe the input through sharp for processing
+    input.pipe(transform).on('error', (err) => {
         console.error('Error processing image:', err);
         redirect(req, res);
     });
 
-    // Set additional headers (if available)
-    input.on('end', () => {
-        res.setHeader('x-original-size', req.params.originSize);
-        res.setHeader('x-bytes-saved', req.params.originSize - totalBytesSent);
+    // Pipe the sharp output to the PassThrough stream
+    transform.pipe(passThrough);
+
+    // Set headers before starting to stream data
+    passThrough.on('data', (chunk) => {
+        if (!res.headersSent) {
+            res.setHeader('content-type', `image/${format}`);
+            res.setHeader('content-disposition', 'inline');
+        }
+
+        // Track bytes sent to implement chunking logic if necessary
+        bytesSent += chunk.length;
+
+        // Send chunks to the client (1 MB max per chunk)
+        if (bytesSent <= 1024 * 1024) {
+            res.write(chunk);
+        } else {
+            res.write(chunk);
+            bytesSent = 0; // Reset byte counter for the next chunk
+        }
     });
 
-    input.on('error', err => {
-        console.error('Error reading input:', err);
+    passThrough.on('end', () => {
+        if (!res.headersSent) {
+            res.status(200);
+        }
+        res.end(); // End the response
+    });
+
+    passThrough.on('error', (err) => {
+        console.error('Error streaming data:', err);
         redirect(req, res);
     });
 }
+
 
 /**
  * Main proxy handler for bandwidth optimization.
