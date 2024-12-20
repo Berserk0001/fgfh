@@ -78,8 +78,8 @@ function compress(req, res, input) {
             res.setHeader('x-original-size', req.params.originSize);
             res.setHeader('x-bytes-saved', req.params.originSize - info.size);
             res.status(200);
-            res.write(data);
-            res.end();
+            //res.write(data);
+            res.end(data);
         })
         .catch(err => redirect(req, res));
 }
